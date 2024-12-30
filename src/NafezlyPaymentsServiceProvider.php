@@ -13,6 +13,7 @@ use Nafezly\Payments\Classes\ThawaniPayment;
 use Nafezly\Payments\Classes\TapPayment;
 use Nafezly\Payments\Classes\OpayPayment;
 use Nafezly\Payments\Classes\PaymobWalletPayment;
+use Nafezly\Payments\Classes\UnifiedPaymobPayment;
 
 class NafezlyPaymentsServiceProvider extends ServiceProvider
 {
@@ -80,6 +81,9 @@ class NafezlyPaymentsServiceProvider extends ServiceProvider
         });
         $this->app->bind(PaymobWalletPayment::class, function () {
             return new PaymobWalletPayment();
+        });
+        $this->app->bind(UnifiedPaymobPayment::class, function () {
+            return new UnifiedPaymobPayment();
         });
         $this->app->bind(PaytabsPayment::class, function () {
             return new PaytabsPayment();

@@ -9,17 +9,25 @@ use Illuminate\Support\Facades\Http;
 use Nafezly\Payments\Exceptions\MissingPaymentInfoException;
 use Nafezly\Payments\Interfaces\PaymentInterface;
 
-class PaymobWalletPayment extends BaseController implements PaymentInterface
+class UnifiedPaymobPayment extends BaseController implements PaymentInterface
 {
     private $paymob_public_key;
     private $paymob_secret_key;
-    private $paymob_wallet_integration_id;
+    private $paymob_integration_ids;
+
 
     public function __construct()
     {
         $this->paymob_public_key = config('nafezly-payments.PAYMOB_PUBLIC_API_KEY');
         $this->paymob_secret_key = config('nafezly-payments.PAYMOB_SECRET_API_KEY');
-        $this->paymob_wallet_integration_id = config("nafezly-payments.PAYMOB_WALLET_INTEGRATION_ID");
+        if (filled(config('nafezly-payments.PAYMOB_UNIFIED_INTEGRATION_IDS', ''))) {
+            $this->paymob_integration_ids = explode(',', config('nafezly-payments.PAYMOB_UNIFIED_INTEGRATION_IDS', ''));
+        } else {
+            $this->paymob_integration_ids = [
+                config("nafezly-payments.PAYMOB_INTEGRATION_ID", ''),
+                config("nafezly-payments.PAYMOB_WALLET_INTEGRATION_ID", ''),
+            ];
+        }
         $this->currency = config("nafezly-payments.PAYMOB_CURRENCY");
     }
 
@@ -36,7 +44,7 @@ class PaymobWalletPayment extends BaseController implements PaymentInterface
      */
     public function pay($amount = null, $user_id = null, $user_first_name = null, $user_last_name = null, $user_email = null, $user_phone = null, $source = null)
     {
-        $this->setPassedVariablesToGlobal($amount,$user_id,$user_first_name,$user_last_name,$user_email,$user_phone,$source);
+        $this->setPassedVariablesToGlobal($amount, $user_id, $user_first_name, $user_last_name, $user_email, $user_phone, $source);
         $required_fields = ['amount', 'user_first_name', 'user_last_name', 'user_email', 'user_phone'];
         $this->checkRequiredFields($required_fields, 'PayMob');
 
@@ -58,9 +66,14 @@ class PaymobWalletPayment extends BaseController implements PaymentInterface
             ->post('https://accept.paymob.com/v1/intention/', [
                 "amount" => $this->amount * 100,
                 "currency" => $this->currency,
-                "payment_methods" => [
-                    (int)$this->paymob_wallet_integration_id,
-                ],
+                "payment_methods" => collect($this->paymob_integration_ids)
+                    // clear null values if exists.
+                    ->filter()
+                    // convert all to int if numeric (because paymob won't accept id as string
+                    // but you can send integration names too.
+                    ->map(function ($id) {
+                        return is_numeric($id) ? (int)$id : $id;
+                    })->toArray(),
                 "special_reference" => $merchant_order_id,
                 "items" => [],
                 "customer" => [
@@ -92,7 +105,6 @@ class PaymobWalletPayment extends BaseController implements PaymentInterface
             'html' => "",
             'redirect_url' => "https://accept.paymob.com/unifiedcheckout/?publicKey=$this->paymob_public_key&clientSecret={$response['client_secret']}"
         ];
-        
     }
 
     /**
@@ -103,19 +115,19 @@ class PaymobWalletPayment extends BaseController implements PaymentInterface
     {
         $string = $request['amount_cents'] . $request['created_at'] . $request['currency'] . $request['error_occured'] . $request['has_parent_transaction'] . $request['id'] . $request['integration_id'] . $request['is_3d_secure'] . $request['is_auth'] . $request['is_capture'] . $request['is_refunded'] . $request['is_standalone_payment'] . $request['is_voided'] . $request['order'] . $request['owner'] . $request['pending'] . $request['source_data_pan'] . $request['source_data_sub_type'] . $request['source_data_type'] . $request['success'];
 
-        if (hash_hmac('sha512', $string, config('nafezly-payments.PAYMOB_HMAC'))) {
+        if (hash_equals(hash_hmac('sha512', $string, config('nafezly-payments.PAYMOB_HMAC')), $request['hmac'])) {
             if ($request['success'] == "true") {
                 return [
                     'success' => true,
-                    'payment_id'=>$request['merchant_order_id'] ?? $request['order'],
+                    'payment_id' => $request['merchant_order_id'] ?? $request['order'],
                     'message' => __('nafezly::messages.PAYMENT_DONE'),
                     'process_data' => $request->all()
                 ];
             } else {
                 return [
                     'success' => false,
-                    'payment_id'=>$request['merchant_order_id'] ?? $request['order'],
-                    'message' => __('nafezly::messages.PAYMENT_FAILED_WITH_CODE',['CODE'=>$this->getErrorMessage($request['txn_response_code'])]),
+                    'payment_id' => $request['merchant_order_id'] ?? $request['order'],
+                    'message' => __('nafezly::messages.PAYMENT_FAILED_WITH_CODE', ['CODE' => $this->getErrorMessage($request['txn_response_code'])]),
                     'process_data' => $request->all()
                 ];
             }
@@ -123,27 +135,47 @@ class PaymobWalletPayment extends BaseController implements PaymentInterface
         } else {
             return [
                 'success' => false,
-                'payment_id'=>$request['merchant_order_id'] ?? $request['order'],
+                'payment_id' => $request['merchant_order_id'] ?? $request['order'],
                 'message' => __('nafezly::messages.PAYMENT_FAILED'),
                 'process_data' => $request->all()
             ];
         }
     }
-    public function getErrorMessage($code){
-        $errors=[
-            'BLOCKED'=>__('nafezly::messages.Process_Has_Been_Blocked_From_System'),
-            'B'=>__('nafezly::messages.Process_Has_Been_Blocked_From_System'),
-            '5'=>__('nafezly::messages.Balance_is_not_enough'),
-            'F'=>__('nafezly::messages.Your_card_is_not_authorized_with_3D_secure'),
-            '7'=>__('nafezly::messages.Incorrect_card_expiration_date'),
-            '2'=>__('nafezly::messages.Declined'),
-            '6051'=>__('nafezly::messages.Balance_is_not_enough'),
-            '637'=>__('nafezly::messages.The_OTP_number_was_entered_incorrectly'),
-            '11'=>__('nafezly::messages.Security_checks_are_not_passed_by_the_system'),
+
+    public function getErrorMessage($code)
+    {
+        $errors = [
+            'BLOCKED' => __('nafezly::messages.Process_Has_Been_Blocked_From_System'),
+            'B' => __('nafezly::messages.Process_Has_Been_Blocked_From_System'),
+            '5' => __('nafezly::messages.Balance_is_not_enough'),
+            'F' => __('nafezly::messages.Your_card_is_not_authorized_with_3D_secure'),
+            '7' => __('nafezly::messages.Incorrect_card_expiration_date'),
+            '2' => __('nafezly::messages.Declined'),
+            '6051' => __('nafezly::messages.Balance_is_not_enough'),
+            '637' => __('nafezly::messages.The_OTP_number_was_entered_incorrectly'),
+            '11' => __('nafezly::messages.Security_checks_are_not_passed_by_the_system'),
         ];
-        if(isset($errors[$code]))
+        if (isset($errors[$code]))
             return $errors[$code];
         else
             return __('nafezly::messages.An_error_occurred_while_executing_the_operation');
     }
+
+    public function refund($transaction_id, $amount): array
+    {
+        $request_new_token = Http::withHeaders(['content-type' => 'application/json'])
+            ->post('https://accept.paymobsolutions.com/api/auth/tokens', [
+                "api_key" => $this->paymob_api_key
+            ])->json();
+        $refund_process = Http::withHeaders(['content-type' => 'application/json'])
+            ->post('https://accept.paymob.com/api/acceptance/void_refund/refund', ['auth_token' => $request_new_token['token'], 'transaction_id' => $transaction_id, 'amount_cents' => $amount])->json();
+
+        dd($refund_process);
+        return [
+            'transaction_id' => $transaction_id,
+            'amount' => $amount,
+        ];
+
+    }
+
 }
